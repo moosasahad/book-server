@@ -14,12 +14,14 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",
+    origin: process.env.CLIENT_URL || "*",
     methods: ["GET", "POST"],
   },
 });
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.CLIENT_URL || "*"
+}));
 app.use(express.json());
 
 // MongoDB Connection
@@ -78,6 +80,15 @@ app.get("/api/orders", async (req, res) => {
   }
 });
 
+app.get("/api/orders/table/:tableNumber", async (req, res) => {
+  try {
+    const orders = await Order.find({ tableNumber: req.params.tableNumber }).sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch orders for table" });
+  }
+});
+
 app.post("/api/orders", async (req, res) => {
   try {
     const order = await Order.create(req.body);
@@ -89,11 +100,44 @@ app.post("/api/orders", async (req, res) => {
 
 app.patch("/api/orders/:id", async (req, res) => {
   try {
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      { status: req.body.status },
-      { new: true },
-    );
+    const { status, items, totalPrice, paymentMethod, note } = req.body;
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // If trying to modify items/price/note, ensure order is Pending
+    if ((items || totalPrice || paymentMethod || note) && order.status !== "Pending") {
+      return res.status(400).json({ error: "Cannot modify order items after cooking has started" });
+    }
+
+    if (status) {
+         // Optional: Add logic to prevent cancelling if not pending
+         if (status === "Cancelled" && order.status !== "Pending") {
+            return res.status(400).json({ error: "Cannot cancel order that is already cooking" });
+         }
+         order.status = status;
+    }
+    
+    if (items) order.items = items;
+    if (totalPrice) order.totalPrice = totalPrice;
+    if (paymentMethod) order.paymentMethod = paymentMethod;
+    if (note) order.note = note;
+
+    await order.save();
+    
+    // Notify kitchen about the update
+    if (items || totalPrice || paymentMethod || note) {
+       io.to("kitchen").emit("order-update", order);
+    }
+
+    if (status) {
+       // Emit status change to both Table and Kitchen
+       io.to(`table-${order.tableNumber}`).emit("status-changed", order);
+       io.to("kitchen").emit("status-changed", { orderId: order._id, status: order.status });
+    }
+    
     res.json(order);
   } catch (err) {
     res.status(500).json({ error: "Failed to update order status" });
@@ -125,7 +169,7 @@ io.on("connection", (socket) => {
   });
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 httpServer.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
