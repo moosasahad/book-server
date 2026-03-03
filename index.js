@@ -9,6 +9,7 @@ dotenv.config();
 
 const { Menu } = require("./models/Menu");
 const { Order } = require("./models/Order");
+const { Table } = require("./models/Table");
 
 const app = express();
 const httpServer = createServer(app);
@@ -89,6 +90,66 @@ app.get("/api/orders/table/:tableNumber", async (req, res) => {
   }
 });
 
+// Table API Routes
+app.get("/api/tables/:tableNumber", async (req, res) => {
+  try {
+    let table = await Table.findOne({ tableNumber: req.params.tableNumber });
+    if (!table) {
+      // Auto-create table with Available status on first access
+      table = await Table.create({ tableNumber: req.params.tableNumber, status: "Available" });
+    }
+    res.json(table);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch table status" });
+  }
+});
+
+app.patch("/api/tables/:tableNumber", async (req, res) => {
+  try {
+    const { status, reservedByName, reservedByPhone } = req.body;
+    let table = await Table.findOne({ tableNumber: req.params.tableNumber });
+    if (!table) {
+      table = await Table.create({
+        tableNumber: req.params.tableNumber,
+        status: status || "Available",
+        reservedByName: status === "Available" ? null : reservedByName,
+        reservedByPhone: status === "Available" ? null : reservedByPhone
+      });
+    } else {
+      table.status = status;
+      if (status === "Available") {
+        table.reservedByName = null;
+        table.reservedByPhone = null;
+      } else {
+        if (reservedByName !== undefined) table.reservedByName = reservedByName;
+        if (reservedByPhone !== undefined) table.reservedByPhone = reservedByPhone;
+      }
+      await table.save();
+    }
+    // Notify both kitchen and table room
+    const updateData = {
+      tableNumber: req.params.tableNumber,
+      status: table.status,
+      reservedByName: table.reservedByName,
+      reservedByPhone: table.reservedByPhone
+    };
+    io.to("kitchen").emit("table-status-changed", updateData);
+    io.to(`table-${req.params.tableNumber}`).emit("table-status-changed", updateData);
+    res.json(table);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update table status" });
+  }
+});
+
+app.get("/api/tables", async (req, res) => {
+  try {
+    const tables = await Table.find({}).sort({ tableNumber: 1 });
+    res.json(tables);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch tables" });
+  }
+});
+
 app.post("/api/orders", async (req, res) => {
   try {
     const order = await Order.create(req.body);
@@ -113,31 +174,31 @@ app.patch("/api/orders/:id", async (req, res) => {
     }
 
     if (status) {
-         // Optional: Add logic to prevent cancelling if not pending
-         if (status === "Cancelled" && order.status !== "Pending") {
-            return res.status(400).json({ error: "Cannot cancel order that is already cooking" });
-         }
-         order.status = status;
+      // Optional: Add logic to prevent cancelling if not pending
+      if (status === "Cancelled" && order.status !== "Pending") {
+        return res.status(400).json({ error: "Cannot cancel order that is already cooking" });
+      }
+      order.status = status;
     }
-    
+
     if (items) order.items = items;
     if (totalPrice) order.totalPrice = totalPrice;
     if (paymentMethod) order.paymentMethod = paymentMethod;
     if (note) order.note = note;
 
     await order.save();
-    
+
     // Notify kitchen about the update
     if (items || totalPrice || paymentMethod || note) {
-       io.to("kitchen").emit("order-update", order);
+      io.to("kitchen").emit("order-update", order);
     }
 
     if (status) {
-       // Emit status change to both Table and Kitchen
-       io.to(`table-${order.tableNumber}`).emit("status-changed", order);
-       io.to("kitchen").emit("status-changed", { orderId: order._id, status: order.status });
+      // Emit status change to both Table and Kitchen
+      io.to(`table-${order.tableNumber}`).emit("status-changed", order);
+      io.to("kitchen").emit("status-changed", { orderId: order._id, status: order.status });
     }
-    
+
     res.json(order);
   } catch (err) {
     res.status(500).json({ error: "Failed to update order status" });
@@ -162,6 +223,50 @@ io.on("connection", (socket) => {
     console.log("Status update:", data);
     io.to(`table-${data.tableNumber}`).emit("status-changed", data);
     io.to("kitchen").emit("status-changed", data);
+  });
+
+  socket.on("call-waiter", (data) => {
+    console.log("Waiter call from table:", data.tableNumber);
+    io.to("kitchen").emit("waiter-call", {
+      tableNumber: data.tableNumber,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  socket.on("update-table-status", async (data) => {
+    console.log("Table status update:", data);
+    try {
+      const { Table } = require("./models/Table");
+      let table = await Table.findOne({ tableNumber: data.tableNumber });
+      if (!table) {
+        table = await Table.create({
+          tableNumber: data.tableNumber,
+          status: data.status,
+          reservedByName: data.status === "Available" ? null : data.reservedByName,
+          reservedByPhone: data.status === "Available" ? null : data.reservedByPhone
+        });
+      } else {
+        table.status = data.status;
+        if (data.status === "Available") {
+          table.reservedByName = null;
+          table.reservedByPhone = null;
+        } else {
+          if (data.reservedByName !== undefined) table.reservedByName = data.reservedByName;
+          if (data.reservedByPhone !== undefined) table.reservedByPhone = data.reservedByPhone;
+        }
+        await table.save();
+      }
+      const updateData = {
+        tableNumber: data.tableNumber,
+        status: data.status,
+        reservedByName: table.reservedByName,
+        reservedByPhone: table.reservedByPhone
+      };
+      io.to("kitchen").emit("table-status-changed", updateData);
+      io.to(`table-${data.tableNumber}`).emit("table-status-changed", updateData);
+    } catch (err) {
+      console.error("Failed to update table status via socket:", err);
+    }
   });
 
   socket.on("disconnect", () => {

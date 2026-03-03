@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js",
+    "build": "tsc",
+    "lint": "echo \"No linting configured\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
