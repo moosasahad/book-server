@@ -141,6 +141,20 @@ app.patch("/api/tables/:tableNumber", async (req, res) => {
   }
 });
 
+app.post("/api/tables", async (req, res) => {
+  try {
+    const { tableNumber, status } = req.body;
+    let table = await Table.findOne({ tableNumber });
+    if (table) {
+      return res.status(400).json({ error: "Table already exists" });
+    }
+    table = await Table.create({ tableNumber, status: status || "Available" });
+    res.status(201).json(table);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create table" });
+  }
+});
+
 app.get("/api/tables", async (req, res) => {
   try {
     const tables = await Table.find({}).sort({ tableNumber: 1 });
