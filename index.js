@@ -1,11 +1,15 @@
+const dotenv = require("dotenv");
+dotenv.config();
+
 const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const dotenv = require("dotenv");
+const multer = require("multer");
+const { uploadToCloudinary } = require("./cloudinary");
 
-dotenv.config();
+const upload = multer({ storage: multer.memoryStorage() });
 
 const { Menu } = require("./models/Menu");
 const { Order } = require("./models/Order");
@@ -34,6 +38,40 @@ mongoose
   .catch((err) => console.error("MongoDB connection error:", err));
 
 // API Routes
+app.post("/api/upload", upload.any(), async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded" });
+    }
+
+    const uploadPromises = req.files.map(async (file) => {
+      const result = await uploadToCloudinary(file.buffer, file.originalname);
+      return {
+        originalName: file.originalname,
+        fieldName: file.fieldname,
+        mimeType: file.mimetype,
+        size: file.size,
+        url: result.url,
+        secure_url: result.secure_url,
+        public_id: result.public_id,
+        format: result.format,
+        resource_type: result.resource_type,
+        createdAt: result.created_at,
+      };
+    });
+
+    const uploadedFiles = await Promise.all(uploadPromises);
+
+    res.status(200).json({
+      success: true,
+      files: uploadedFiles[0].url,
+    });
+  } catch (err) {
+    console.error("Cloudinary upload error:", err);
+    res.status(500).json({ error: "Failed to upload file(s) to Cloudinary", details: err.message });
+  }
+});
+
 app.get("/api/menu", async (req, res) => {
   try {
     const items = await Menu.find({}).sort({ category: 1, name: 1 });
@@ -175,15 +213,15 @@ app.post("/api/orders", async (req, res) => {
 
 app.patch("/api/orders/:id", async (req, res) => {
   try {
-    const { status, items, totalPrice, paymentMethod, note } = req.body;
+    const { status, items, totalPrice, paymentMethod, note, voiceUrl } = req.body;
     const order = await Order.findById(req.params.id);
 
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // If trying to modify items/price/note, ensure order is Pending
-    if ((items || totalPrice || paymentMethod || note) && order.status !== "Pending") {
+    // If trying to modify items/price/note/voiceUrl, ensure order is Pending
+    if ((items || totalPrice || paymentMethod || note || voiceUrl) && order.status !== "Pending") {
       return res.status(400).json({ error: "Cannot modify order items after cooking has started" });
     }
 
@@ -199,11 +237,12 @@ app.patch("/api/orders/:id", async (req, res) => {
     if (totalPrice) order.totalPrice = totalPrice;
     if (paymentMethod) order.paymentMethod = paymentMethod;
     if (note) order.note = note;
+    if (voiceUrl) order.voiceUrl = voiceUrl;
 
     await order.save();
 
     // Notify kitchen about the update
-    if (items || totalPrice || paymentMethod || note) {
+    if (items || totalPrice || paymentMethod || note || voiceUrl) {
       io.to("kitchen").emit("order-update", order);
     }
 

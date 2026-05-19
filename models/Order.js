@@ -41,6 +41,7 @@ const OrderSchema = new mongoose.Schema(
       default: "Cash",
     },
     note: { type: String }, // Order-level note
+    voiceUrl: { type: String }, // Voice message attachment url
   },
   { timestamps: true },
 );
